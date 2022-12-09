@@ -459,11 +459,7 @@ impl<'a> OptionAck<'a> {
     }
 
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
-        let n_bytes = 2 + self
-            .unknown_options
-            .iter()
-            .map(|(key, value)| key.len() + value.len() + 2)
-            .sum::<usize>();
+        let n_bytes = 2; //ignore unknown options here as we shouldn't send them if we don't know them.
         if n_bytes > buf.len() {
             return Err(TftpError::BufferTooSmall);
         }
