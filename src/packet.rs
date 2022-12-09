@@ -70,6 +70,9 @@ pub struct Request<'a> {
     pub filename: &'a str,
     //only the octet mode is supported so it isn't stored here
     pub blocksize: Option<u16>,
+    pub include_transfer_size: bool,
+    pub timeout_seconds: Option<u32>,
+    pub unknown_options: Vec<(&'a str, &'a str)>,
 }
 
 //want to use a DST here but transmuting between bytes and DST-fat pointers is undefined.
@@ -95,6 +98,8 @@ pub struct Error<'a> {
 #[derive(Debug)]
 pub struct OptionAck<'a> {
     pub blocksize: Option<u16>,
+    pub transfer_size: Option<usize>,
+    pub timeout_seconds: Option<u32>,
     pub unknown_options: Vec<(&'a str, &'a str)>,
 }
 
@@ -330,7 +335,10 @@ impl<'a> Request<'a> {
         Self {
             is_read,
             filename,
+            include_transfer_size: false,
+            timeout_seconds: None,
             blocksize,
+            unknown_options: Vec::with_capacity(0),
         }
     }
 
@@ -349,17 +357,37 @@ impl<'a> Request<'a> {
         let (filename, data) = printable_ascii_str_from_u8(&data[2..]);
         let (mode, mut options_data) = printable_ascii_str_from_u8(data);
         let mut blocksize = None;
+        let mut include_transfer_size = false;
+        let mut timeout_seconds = None;
+        let mut vec = Vec::with_capacity(0);
         while let Some((option, remainder)) = get_option_pair(options_data) {
             if option.0.eq_ignore_ascii_case("blksize") {
                 if blocksize.is_some() {
                     panic!("blksize option specified multiple times in request!");
                 }
                 blocksize = Some(parse_blocksize(option.1))
+            } else if option.0.eq_ignore_ascii_case("tsize") {
+                if include_transfer_size {
+                    panic!("tsize option specified multiple times in request!");
+                }
+                assert_eq!(option.1, "0");
+                include_transfer_size = true;
+            } else if option.0.eq_ignore_ascii_case("timeout") {
+                if timeout_seconds.is_some() {
+                    panic!("timeout option specified multiple times in request!");
+                }
+                let timeout = option.1.parse::<u32>().expect("failed to parse time-out");
+                timeout_seconds = Some(timeout);
+            } else {
+                vec.push(option);
             }
             options_data = remainder;
         }
         assert!(mode.eq_ignore_ascii_case("octet"));
         Self {
+            include_transfer_size,
+            timeout_seconds,
+            unknown_options: vec,
             blocksize,
             is_read,
             filename,
@@ -384,6 +412,8 @@ impl<'a> Request<'a> {
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
         let mode = b"octets\0";
         let blksize = b"blksize\0";
+        let tsize = b"tsize\0";
+        let timeout = b"timeout\0";
         let blocksize_val = self.blocksize.map(|u| {
             let mut formated = format!("{u}").into_bytes();
             formated.push(0);
@@ -394,9 +424,25 @@ impl<'a> Request<'a> {
         } else {
             0
         };
+        let timeout_val = self.timeout_seconds.map(|u| {
+            let mut formated = format!("{u}").into_bytes();
+            formated.push(0);
+            formated
+        });
+        let timeout_n_bytes = if let Some(timeout_val) = &timeout_val {
+            timeout_val.len() + timeout.len()
+        } else {
+            0
+        };
+        let tsize_n_bytes = if self.include_transfer_size {
+            tsize.len() + 2
+        } else {
+            0
+        };
         let name_len = self.filename.len();
         let mode_len = mode.len();
-        let n_bytes = 2 + name_len + 1 + mode_len + blocksize_n_bytes;
+        let n_bytes =
+            2 + name_len + 1 + mode_len + blocksize_n_bytes + tsize_n_bytes + timeout_n_bytes;
 
         if n_bytes > buf.len() {
             return Err(TftpError::BufferTooSmall);
@@ -407,10 +453,25 @@ impl<'a> Request<'a> {
         buf[2 + name_len] = 0;
         buf[2 + name_len + 1..2 + name_len + 1 + mode_len].copy_from_slice(mode);
         let offset = 2 + name_len + 1 + mode_len;
-        if let Some(blocksize) = blocksize_val {
+        let offset = if let Some(blocksize) = blocksize_val {
             buf[offset..offset + blksize.len()].copy_from_slice(blksize);
             buf[offset + blksize.len()..offset + blksize.len() + blocksize.len()]
                 .copy_from_slice(&blocksize);
+            offset + blksize.len() + blocksize.len()
+        } else {
+            offset
+        };
+        let offset = if let Some(timeout_val) = timeout_val {
+            buf[offset..offset + timeout.len()].copy_from_slice(timeout);
+            buf[offset + timeout.len()..offset + timeout.len() + timeout_val.len()]
+                .copy_from_slice(&timeout_val);
+            timeout_val.len() + timeout.len()
+        } else {
+            offset
+        };
+        if self.include_transfer_size {
+            buf[offset..offset + tsize.len()].copy_from_slice(tsize);
+            buf[offset + tsize.len()..offset + tsize.len() + 2].copy_from_slice(b"0\0");
         }
         Ok(n_bytes)
     }
@@ -480,10 +541,16 @@ impl<'a> Error<'a> {
 }
 
 impl<'a> OptionAck<'a> {
-    pub fn new(blocksize: Option<u16>) -> Self {
+    pub fn new(
+        blocksize: Option<u16>,
+        transfer_size: Option<usize>,
+        timeout_seconds: Option<u32>,
+    ) -> Self {
         //can't _construct_ an option ack with unknown fields because the server wouldn't know how to handle them.
         Self {
             blocksize,
+            transfer_size,
+            timeout_seconds,
             unknown_options: Vec::with_capacity(0),
         }
     }
@@ -496,19 +563,38 @@ impl<'a> OptionAck<'a> {
         let mut data = &data[2..];
         let mut vec = Vec::with_capacity(0);
         let mut blocksize = None;
+        let mut transfer_size = None;
+        let mut timeout_seconds = None;
         while let Some((option, remainder)) = get_option_pair(data) {
             if option.0.eq_ignore_ascii_case("blksize") {
                 if blocksize.is_some() {
                     panic!("blksize option specified multiple times in request!");
                 }
                 blocksize = Some(parse_blocksize(option.1))
+            } else if option.0.eq_ignore_ascii_case("tsize") {
+                if transfer_size.is_some() {
+                    panic!("tsize option specified multiple times in request!");
+                }
+                let transfer_size_val = option
+                    .1
+                    .parse::<usize>()
+                    .expect("failed to parse transfer-size");
+                transfer_size = Some(transfer_size_val);
+            } else if option.0.eq_ignore_ascii_case("timeout") {
+                if timeout_seconds.is_some() {
+                    panic!("timeout option specified multiple times in request!");
+                }
+                let timeout = option.1.parse::<u32>().expect("failed to parse time-out");
+                timeout_seconds = Some(timeout);
             } else {
                 vec.push(option);
-                data = remainder;
             }
+            data = remainder;
         }
         Self {
             blocksize,
+            transfer_size,
+            timeout_seconds,
             unknown_options: vec,
         }
     }
