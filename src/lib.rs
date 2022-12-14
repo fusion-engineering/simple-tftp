@@ -36,9 +36,24 @@ impl TFTPSocket {
     }
 
     pub fn send_message_to(&mut self, message: Packet, addr: SocketAddr) -> Result<(), IoError> {
+        self.send_message_optionally_to(message, Some(addr))
+    }
+    pub fn send_message(&mut self, message: Packet) -> Result<(), IoError> {
+        self.send_message_optionally_to(message, None)
+    }
+
+    pub fn send_message_optionally_to(
+        &mut self,
+        message: Packet,
+        addr: Option<SocketAddr>,
+    ) -> Result<(), IoError> {
         let bytes = message.to_bytes(&mut self.buffer).unwrap();
         let message = &self.buffer[..bytes];
-        let bytes_send = UdpSocket::send_to(&self.sock, message, addr)?;
+        let bytes_send = if let Some(addr) = addr {
+            UdpSocket::send_to(&self.sock, message, addr)
+        } else {
+            UdpSocket::send(&self.sock, message)
+        }?;
         if bytes_send == message.len() {
             Ok(())
         } else {
