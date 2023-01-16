@@ -69,6 +69,7 @@ pub struct Request<'a> {
     is_read: bool,
     pub filename: &'a str,
     //only the octet mode is supported so it isn't stored here
+    pub blocksize: Option<u16>,
 }
 
 //want to use a DST here but transmuting between bytes and DST-fat pointers is undefined.
@@ -93,6 +94,7 @@ pub struct Error<'a> {
 
 #[derive(Debug)]
 pub struct OptionAck<'a> {
+    pub blocksize: Option<u16>,
     pub unknown_options: Vec<(&'a str, &'a str)>,
 }
 
@@ -110,12 +112,12 @@ impl<'a> Packet<'a> {
         Self::Data(Data::new(block_nr, data))
     }
 
-    pub fn new_read_request(filename: &'a str) -> Self {
-        Self::Request(Request::new_read_request(filename))
+    pub fn new_read_request(filename: &'a str, blocksize: Option<u16>) -> Self {
+        Self::Request(Request::new_read_request(filename, blocksize))
     }
 
-    pub fn new_write_request(filename: &'a str) -> Self {
-        Self::Request(Request::new_write_request(filename))
+    pub fn new_write_request(filename: &'a str, blocksize: Option<u16>) -> Self {
+        Self::Request(Request::new_write_request(filename, blocksize))
     }
 
     pub fn new_error(error_code: ErrorCode, message: &'a str) -> Self {
@@ -301,18 +303,34 @@ fn get_option_pair(data: &[u8]) -> Option<((&str, &str), &[u8])> {
     }
 }
 
+fn parse_blocksize(as_str: &str) -> u16 {
+    let requested_blocksize = as_str
+        .parse::<u16>()
+        .expect("couldn't parse blksize option as u16");
+    //Valid values range between "8" and "65464" octets, inclusive.
+    if requested_blocksize < 8 || requested_blocksize > 65464 {
+        panic!(
+            "requested blocksize {requested_blocksize} falls outside of the valid-range 8..=65464"
+        );
+    } else {
+        requested_blocksize
+    }
+}
+
 impl<'a> Request<'a> {
-    pub fn new_read_request(filename: &'a str) -> Self {
-        Self {
-            is_read: true,
-            filename,
-        }
+    pub fn new_read_request(filename: &'a str, blocksize: Option<u16>) -> Self {
+        Self::new_request(filename, blocksize, true)
     }
 
-    pub fn new_write_request(filename: &'a str) -> Self {
+    pub fn new_write_request(filename: &'a str, blocksize: Option<u16>) -> Self {
+        Self::new_request(filename, blocksize, false)
+    }
+
+    fn new_request(filename: &'a str, blocksize: Option<u16>, is_read: bool) -> Self {
         Self {
-            is_read: false,
+            is_read,
             filename,
+            blocksize,
         }
     }
 
@@ -329,10 +347,20 @@ impl<'a> Request<'a> {
 
     fn from_bytes_skip_opcode_check(data: &'a [u8], is_read: bool) -> Self {
         let (filename, data) = printable_ascii_str_from_u8(&data[2..]);
-        let mode = printable_ascii_str_from_u8(data).0;
+        let (mode, mut options_data) = printable_ascii_str_from_u8(data);
+        let mut blocksize = None;
+        while let Some((option, remainder)) = get_option_pair(options_data) {
+            if option.0.eq_ignore_ascii_case("blksize") {
+                if blocksize.is_some() {
+                    panic!("blksize option specified multiple times in request!");
+                }
+                blocksize = Some(parse_blocksize(option.1))
+            }
+            options_data = remainder;
+        }
         assert!(mode.eq_ignore_ascii_case("octet"));
         Self {
-            //todo: handle modes too.
+            blocksize,
             is_read,
             filename,
         }
@@ -355,18 +383,35 @@ impl<'a> Request<'a> {
 
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
         let mode = b"octets\0";
+        let blksize = b"blksize\0";
+        let blocksize_val = self.blocksize.map(|u| {
+            let mut formated = format!("{u}").into_bytes();
+            formated.push(0);
+            formated
+        });
+        let blocksize_n_bytes = if let Some(blocksize) = &blocksize_val {
+            blocksize.len() + blksize.len()
+        } else {
+            0
+        };
         let name_len = self.filename.len();
         let mode_len = mode.len();
-        let n_bytes = 2 + name_len + 1 + mode_len;
+        let n_bytes = 2 + name_len + 1 + mode_len + blocksize_n_bytes;
+
         if n_bytes > buf.len() {
             return Err(TftpError::BufferTooSmall);
         }
         let opcode = (self.opcode() as u16).to_be_bytes();
-
         buf[0..2].copy_from_slice(&opcode);
         buf[2..2 + name_len].copy_from_slice(self.filename.as_bytes());
         buf[2 + name_len] = 0;
         buf[2 + name_len + 1..2 + name_len + 1 + mode_len].copy_from_slice(mode);
+        let offset = 2 + name_len + 1 + mode_len;
+        if let Some(blocksize) = blocksize_val {
+            buf[offset..offset + blksize.len()].copy_from_slice(blksize);
+            buf[offset + blksize.len()..offset + blksize.len() + blocksize.len()]
+                .copy_from_slice(&blocksize);
+        }
         Ok(n_bytes)
     }
 }
@@ -435,9 +480,10 @@ impl<'a> Error<'a> {
 }
 
 impl<'a> OptionAck<'a> {
-    pub fn new() -> Self {
+    pub fn new(blocksize: Option<u16>) -> Self {
         //can't _construct_ an option ack with unknown fields because the server wouldn't know how to handle them.
         Self {
+            blocksize,
             unknown_options: Vec::with_capacity(0),
         }
     }
@@ -449,21 +495,45 @@ impl<'a> OptionAck<'a> {
     fn from_bytes_skip_opcode_check(data: &'a [u8]) -> Self {
         let mut data = &data[2..];
         let mut vec = Vec::with_capacity(0);
+        let mut blocksize = None;
         while let Some((option, remainder)) = get_option_pair(data) {
-            vec.push(option);
-            data = remainder;
+            if option.0.eq_ignore_ascii_case("blksize") {
+                if blocksize.is_some() {
+                    panic!("blksize option specified multiple times in request!");
+                }
+                blocksize = Some(parse_blocksize(option.1))
+            } else {
+                vec.push(option);
+                data = remainder;
+            }
         }
         Self {
+            blocksize,
             unknown_options: vec,
         }
     }
 
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
-        let n_bytes = 2; //ignore unknown options here as we shouldn't send them if we don't know them.
+        let blksize = b"blksize\0";
+        let blocksize_val = self.blocksize.map(|u| {
+            let mut formated = format!("{u}").into_bytes();
+            formated.push(0);
+            formated
+        });
+        let blocksize_n_bytes = if let Some(blocksize) = &blocksize_val {
+            blocksize.len() + blksize.len()
+        } else {
+            0
+        };
+        let n_bytes = 2 + blocksize_n_bytes; //we ignore unknown options here as we should never send options we don't understand yet.
         if n_bytes > buf.len() {
             return Err(TftpError::BufferTooSmall);
         }
         buf[0..2].copy_from_slice(&(OpCode::OptionAck as u16).to_be_bytes());
+        if let Some(blocksize) = blocksize_val {
+            buf[2..2 + blksize.len()].copy_from_slice(blksize);
+            buf[2 + blksize.len()..2 + blksize.len() + blocksize.len()].copy_from_slice(&blocksize);
+        }
         Ok(n_bytes)
     }
 }
