@@ -1,7 +1,10 @@
 //n.b. these features aren't needed to build the library, only the example.
 // the library can be build on stable :)
 #![feature(let_chains, result_flattening)]
-use simple_tftp::{packet, server::*};
+use simple_tftp::{
+    packet::{self, OptionAck},
+    server::*,
+};
 use std::net::{IpAddr, Ipv4Addr};
 
 // the ip-address this server should bind too. Only tested with IPv4 but IPv6 should work too.
@@ -9,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr};
 //  make sure you configure your DHCP server (likely your router) to tell the client about this
 // servers existance via DHCP option 66: TFTP Server Name.
 const SERVER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
+
 //The folder whose contents will be exposed by the server. Any request for a file such as `/hello/world.txt`
 // will be appended to this path.
 //
@@ -26,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // using the adress it just got from the client, and picking a new random port for itself.  (SERVER_IP:P2 -> CLIENT_IP:P1)
         let (request, client_addr) = server.get_next_request_from()?;
         // A request can be a read (the most common use case) or a write
+        // this example server only supports reads.
         if request.is_read() {
             //and every request comes with a path.
             // NOTE: the TFTP RFC does not actually specify any format for this path. The request might be formatted using Linux path syntax while
@@ -42,10 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let checked_for_escape = full_path
                 .map(|path| {
                     if !path.starts_with(local_path) {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "File not found",
-                        ))
+                        Err(std::io::ErrorKind::NotFound.into())
                     } else {
                         std::fs::File::open(path)
                     }
@@ -53,22 +55,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .flatten();
 
             if let Ok(file) = checked_for_escape {
+                //if the request asked for the filesize to be included in the opt-ack
+                let file_size = request
+                    .include_transfer_size
+                    //try to get the filesize from the metada
+                    .then(|| file.metadata().map(|md| md.len()))
+                    //and if that fails for whatever reason, ignore the option.
+                    .transpose()
+                    .unwrap_or(None);
+                let block_size = request.blocksize;
                 //needed to please the borrow checked. requested_path lives in the servers internal UDP receive buffer.
+                // and we print this path in the thread spawned below.
                 let requested_path = requested_path.to_owned();
                 //we've done all our checks, so now we start sending the file too the client.
                 // `create_transfer_to` takes any type that implement std::io::Read, which includes File or vec<u8>.
                 // and will buffer it and transfer it to the client in chunks of 512 bytes (as per spec)
-                let transfer = server.create_transfer_to(client_addr, file)?;
+                let transfer = server.create_transfer_to(
+                    client_addr,
+                    file,
+                    OptionAck::new(block_size, file_size),
+                )?;
                 //spawn this transfer onto a thread, so that multiple transfers can be handled at once.
                 std::thread::spawn(move || {
-                    //we need to call finish to actually start transfering the data to the client.
-                    // this can error out
                     if let Err(e) = transfer.finish() {
                         //an error can occur for three reasons:
-                        // -either we have hit an io-error,
-                        // -or the client has send us an error packet during the transfer,
-                        // -or the client has send us an invalid reply.
-                        // the transfer will not automatically send an error back to the client in this case.
+                        // 1. we have hit an io-error reading the file,
+                        // 2. we hit an io-error while doing udp transfers
+                        // 3. or the client has send us an error packet during the transfer,
+                        // 4. or the client has send us an invalid reply.
+                        // in the case of 1, the server will automatically try to send an error packet to the client
+                        // before returning the initial IO error.
+                        // in all other cases it will not notify the client. As either the client Explicitly errored out, or the client messed up
+                        // or we're having issues with the underlying UDP and will likely fail sending the error message too.
                         eprintln!("[{client_addr}] failed to transfer {requested_path:?}: {e:?}");
                     } else {
                         println!("[{client_addr}] send all packets for {requested_path:?}");

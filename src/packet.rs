@@ -98,7 +98,7 @@ pub struct Error<'a> {
 #[derive(Debug)]
 pub struct OptionAck<'a> {
     pub blocksize: Option<u16>,
-    pub transfer_size: Option<usize>,
+    pub transfer_size: Option<u64>,
     pub timeout_seconds: Option<u32>,
     pub unknown_options: Vec<(&'a str, &'a str)>,
 }
@@ -541,16 +541,13 @@ impl<'a> Error<'a> {
 }
 
 impl<'a> OptionAck<'a> {
-    pub fn new(
-        blocksize: Option<u16>,
-        transfer_size: Option<usize>,
-        timeout_seconds: Option<u32>,
-    ) -> Self {
+    pub fn new(blocksize: Option<u16>, transfer_size: Option<u64>) -> Self {
         //can't _construct_ an option ack with unknown fields because the server wouldn't know how to handle them.
+        // we don't support timeouts in the server either, so we don't construct those either.
         Self {
             blocksize,
             transfer_size,
-            timeout_seconds,
+            timeout_seconds: None,
             unknown_options: Vec::with_capacity(0),
         }
     }
@@ -575,16 +572,13 @@ impl<'a> OptionAck<'a> {
                 if transfer_size.is_some() {
                     panic!("tsize option specified multiple times in request!");
                 }
-                let transfer_size_val = option
-                    .1
-                    .parse::<usize>()
-                    .expect("failed to parse transfer-size");
+                let transfer_size_val = option.1.parse().expect("failed to parse transfer-size");
                 transfer_size = Some(transfer_size_val);
             } else if option.0.eq_ignore_ascii_case("timeout") {
                 if timeout_seconds.is_some() {
                     panic!("timeout option specified multiple times in request!");
                 }
-                let timeout = option.1.parse::<u32>().expect("failed to parse time-out");
+                let timeout = option.1.parse().expect("failed to parse time-out");
                 timeout_seconds = Some(timeout);
             } else {
                 vec.push(option);
@@ -621,5 +615,12 @@ impl<'a> OptionAck<'a> {
             buf[2 + blksize.len()..2 + blksize.len() + blocksize.len()].copy_from_slice(&blocksize);
         }
         Ok(n_bytes)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocksize.is_none()
+            && self.timeout_seconds.is_none()
+            && self.transfer_size.is_none()
+            && self.unknown_options.is_empty()
     }
 }

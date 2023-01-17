@@ -1,5 +1,5 @@
 use crate::{
-    packet::{Ack, DataStream, Error, Packet, Request},
+    packet::{Ack, DataStream, Error, OptionAck, Packet, Request},
     TFTPSocket,
 };
 use std::{
@@ -43,58 +43,91 @@ impl Server {
         &self,
         target: SocketAddr,
         source: R,
+        options: OptionAck<'static>,
     ) -> IoResult<Transfer<R>> {
-        Transfer::new_with_blocksize(source, self.sock.sock.local_addr()?.ip(), target, 512)
+        Transfer::new(source, self.sock.sock.local_addr()?.ip(), target, options)
     }
 
     pub fn send_error_to(&mut self, error: Error, addr: SocketAddr) -> IoResult<()> {
         self.sock.send_message_to(Packet::Error(error), addr)
+    }
+
+    pub fn ip(&self) -> Result<IpAddr, IoError> {
+        self.sock.sock.local_addr().map(|a| a.ip())
     }
 }
 
 pub struct Transfer<R: Read> {
     sock: TFTPSocket,
     source: DataStream<R>,
+    options: OptionAck<'static>,
+}
+
+pub fn do_transfer_with_options<R: Read>(
+    source: R,
+    ip: IpAddr,
+    target: SocketAddr,
+    options: crate::packet::OptionAck<'static>,
+) -> Result<(), IoError> {
+    Transfer::new(source, ip, target, options)?.finish()
 }
 
 impl<R: Read> Transfer<R> {
-    fn new_with_blocksize(
+    fn new(
         source: R,
         ip: IpAddr,
         target: SocketAddr,
-        block_size: u16,
+        options: OptionAck<'static>,
     ) -> IoResult<Self> {
         Ok(Self {
             sock: TFTPSocket::new(SocketAddr::new(ip, 0), Some(target))?,
-            source: DataStream::new(source, block_size),
+            source: DataStream::new(source, options.blocksize.unwrap_or(512)),
+            options,
         })
     }
 
-    pub fn finish(mut self) -> IoResult<()> {
-        while let Some(bytes) = self.source.next_raw()? {
-            self.sock.sock.send(bytes)?;
+    // checks that `reply` is an ACK packet with block_nr `current_block`
+    fn check_ack(reply: Packet, current_block: u16) -> IoResult<()> {
+        match reply {
+            Packet::Ack(Ack { block_nr: block }) if block == current_block => Ok(()),
+            Packet::Error(e) => Err(IoError::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Received TFTP error ({} : \"{}\") while waiting on ({current_block})",
+                    e.error_code, e.message
+                ),
+            )),
+            e => Err(IoError::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Received unexpected packet while waiting on Ack({current_block}): {e:?}"),
+            )),
+        }
+    }
+    pub fn finish(mut self) -> Result<(), IoError> {
+        // let mut sock = TFTPSocket::new(SocketAddr::new(ip, 0), Some(target))?;
+        // let mut source = DataStream::new(source, options.blocksize.unwrap_or(512));
+        if !self.options.is_empty() {
+            self.sock.send_message(Packet::OptionAck(self.options))?;
             let (reply, _) = self.sock.get_next_message_from()?;
-            let current_block = self.source.last_block();
-            match reply {
-                Packet::Ack(Ack { block_nr: block }) if block == current_block => {}
-                Packet::Error(e) => {
-                    return Err(IoError::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "Received TFTP error ({} : \"{}\") while waiting on ({current_block})",
-                            e.error_code, e.message
-                        ),
+            Self::check_ack(reply, 0)?;
+        }
+        while let Some(bytes) = {
+            match self.source.next_raw() {
+                Ok(x) => x,
+                //if source.next_raw() fails to get bytes, i.e. calling "read" on the underlying source fails,
+                // try to notify the client of the error before returning
+                Err(e) => {
+                    let _may_fail = self.sock.send_message(Packet::new_error(
+                        crate::packet::ErrorCode::NOT_DEFINED,
+                        "Unexpected IO error",
                     ));
-                }
-                e => {
-                    return Err(IoError::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                        "Received unexpected packet while waiting on Ack({current_block}): {e:?}"
-                    ),
-                    ));
+                    return Err(e);
                 }
             }
+        } {
+            self.sock.sock.send(bytes)?;
+            let (reply, _) = self.sock.get_next_message_from()?;
+            Self::check_ack(reply, self.source.last_block())?;
         }
         Ok(())
     }
