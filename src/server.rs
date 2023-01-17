@@ -5,7 +5,7 @@ use crate::{
 use std::{
     io::{Error as IoError, Read, Result as IoResult},
     net::{IpAddr, SocketAddr},
-    result::Result,
+    time::Duration,
 };
 
 pub struct Server {
@@ -23,9 +23,18 @@ impl Server {
         })
     }
 
-    pub fn get_next_request_from(&mut self) -> (Request<'_>, SocketAddr) {
-        match self.sock.get_next_message_from().unwrap() {
-            (Packet::Request(req), addr) => (req, addr),
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> IoResult<()> {
+        self.sock.sock.set_read_timeout(timeout)
+    }
+
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> IoResult<()> {
+        self.sock.sock.set_write_timeout(timeout)
+    }
+
+    pub fn get_next_request_from(&mut self) -> IoResult<(Request<'_>, SocketAddr)> {
+        match self.sock.get_next_message_from()? {
+            (Packet::Request(req), addr) => Ok((req, addr)),
+            //todo: don't panic here
             _ => panic!("invalid packet received"),
         }
     }
@@ -35,11 +44,11 @@ impl Server {
         target: SocketAddr,
         source: R,
         options: OptionAck<'static>,
-    ) -> Result<Transfer<R>, IoError> {
+    ) -> IoResult<Transfer<R>> {
         Transfer::new(source, self.sock.sock.local_addr()?.ip(), target, options)
     }
 
-    pub fn send_error_to(&mut self, error: Error, addr: SocketAddr) -> Result<(), IoError> {
+    pub fn send_error_to(&mut self, error: Error, addr: SocketAddr) -> IoResult<()> {
         self.sock.send_message_to(Packet::Error(error), addr)
     }
 
@@ -69,7 +78,7 @@ impl<R: Read> Transfer<R> {
         ip: IpAddr,
         target: SocketAddr,
         options: OptionAck<'static>,
-    ) -> Result<Self, IoError> {
+    ) -> IoResult<Self> {
         Ok(Self {
             sock: TFTPSocket::new(SocketAddr::new(ip, 0), Some(target))?,
             source: DataStream::new(source, options.blocksize.unwrap_or(512)),
@@ -78,7 +87,7 @@ impl<R: Read> Transfer<R> {
     }
 
     // checks that `reply` is an ACK packet with block_nr `current_block`
-    fn check_ack(reply: Packet, current_block: u16) -> Result<(), IoError> {
+    fn check_ack(reply: Packet, current_block: u16) -> IoResult<()> {
         match reply {
             Packet::Ack(Ack { block_nr: block }) if block == current_block => Ok(()),
             Packet::Error(e) => Err(IoError::new(

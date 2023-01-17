@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // and a random port for the client. (CLIENT_IP:P1 -> SERVER_IP:69)
         // The server will then respond over UDP with a Data packet (for read), an Ack packet (for write), or an Error packet
         // using the adress it just got from the client, and picking a new random port for itself.  (SERVER_IP:P2 -> CLIENT_IP:P1)
-        let (request, client_addr) = server.get_next_request_from();
+        let (request, client_addr) = server.get_next_request_from()?;
         // A request can be a read (the most common use case) or a write
         // this example server only supports reads.
         if request.is_read() {

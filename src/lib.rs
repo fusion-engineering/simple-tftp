@@ -35,7 +35,7 @@ impl TFTPSocket {
             .map(|a| (a, client_addres))
     }
 
-    pub fn send_message_to(&mut self, message: Packet, addr: SocketAddr) -> Result<(), IoError> {
+    pub fn send_message_to(&mut self, message: Packet, addr: SocketAddr) -> IoResult<()> {
         self.send_message_optionally_to(message, Some(addr))
     }
     pub fn send_message(&mut self, message: Packet) -> Result<(), IoError> {
