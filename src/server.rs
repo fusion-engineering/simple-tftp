@@ -5,7 +5,7 @@ use crate::{
 use std::{
     io::{Error as IoError, Read, Result as IoResult},
     net::{IpAddr, SocketAddr},
-    result::Result,
+    time::Duration,
 };
 
 pub struct Server {
@@ -23,9 +23,18 @@ impl Server {
         })
     }
 
-    pub fn get_next_request_from(&mut self) -> (Request<'_>, SocketAddr) {
-        match self.sock.get_next_message_from().unwrap() {
-            (Packet::Request(req), addr) => (req, addr),
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> IoResult<()> {
+        self.sock.sock.set_read_timeout(timeout)
+    }
+
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> IoResult<()> {
+        self.sock.sock.set_write_timeout(timeout)
+    }
+
+    pub fn get_next_request_from(&mut self) -> IoResult<(Request<'_>, SocketAddr)> {
+        match self.sock.get_next_message_from()? {
+            (Packet::Request(req), addr) => Ok((req, addr)),
+            //todo: don't panic here
             _ => panic!("invalid packet received"),
         }
     }
@@ -34,11 +43,11 @@ impl Server {
         &self,
         target: SocketAddr,
         source: R,
-    ) -> Result<Transfer<R>, IoError> {
+    ) -> IoResult<Transfer<R>> {
         Transfer::new_with_blocksize(source, self.sock.sock.local_addr()?.ip(), target, 512)
     }
 
-    pub fn send_error_to(&mut self, error: Error, addr: SocketAddr) -> Result<(), IoError> {
+    pub fn send_error_to(&mut self, error: Error, addr: SocketAddr) -> IoResult<()> {
         self.sock.send_message_to(Packet::Error(error), addr)
     }
 }
@@ -54,14 +63,14 @@ impl<R: Read> Transfer<R> {
         ip: IpAddr,
         target: SocketAddr,
         block_size: u16,
-    ) -> Result<Self, IoError> {
+    ) -> IoResult<Self> {
         Ok(Self {
             sock: TFTPSocket::new(SocketAddr::new(ip, 0), Some(target))?,
             source: DataStream::new(source, block_size),
         })
     }
 
-    pub fn finish(mut self) -> Result<(), IoError> {
+    pub fn finish(mut self) -> IoResult<()> {
         while let Some(bytes) = self.source.next_raw()? {
             self.sock.sock.send(bytes)?;
             let (reply, _) = self.sock.get_next_message_from()?;

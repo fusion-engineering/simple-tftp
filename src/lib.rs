@@ -35,7 +35,7 @@ impl TFTPSocket {
             .map(|a| (a, client_addres))
     }
 
-    pub fn send_message_to(&mut self, message: Packet, addr: SocketAddr) -> Result<(), IoError> {
+    pub fn send_message_to(&mut self, message: Packet, addr: SocketAddr) -> IoResult<()> {
         let bytes = message.to_bytes(&mut self.buffer).unwrap();
         let message = &self.buffer[..bytes];
         let bytes_send = UdpSocket::send_to(&self.sock, message, addr)?;
