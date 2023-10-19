@@ -1,6 +1,7 @@
 use crate::{
-    packet::{Ack, DataStream, Error, OptionAck, Packet, Request},
-    TFTPSocket,
+    datastream::DataStream,
+    packet::{Ack, Error, OptionAck, Packet, Request},
+    socket::TFTPSocket,
 };
 use std::{
     io::{Error as IoError, Read, Result as IoResult},

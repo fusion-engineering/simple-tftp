@@ -1,11 +1,10 @@
-use std::io::Error as IoError;
-
 #[derive(Debug)]
 pub enum Error {
     BufferTooSmall,
     InvalidOpcode(u16),
     InvalidAck,
-    IoError(IoError),
+    #[cfg(feature = "std")]
+    IoError(std::io::Error),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;

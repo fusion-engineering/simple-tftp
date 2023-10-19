@@ -1,4 +1,56 @@
 use crate::error::{Error as TftpError, Result as TftpResult};
+use core::fmt::Write;
+
+struct BufferWriter<'a> {
+    buff: &'a mut [u8],
+    size: usize,
+    overflowed: bool,
+}
+
+impl<'a> BufferWriter<'a> {
+    pub fn new(buff: &'a mut [u8]) -> Self {
+        Self {
+            buff,
+            size: 0,
+            overflowed: true,
+        }
+    }
+
+    pub fn push_bytes(&mut self, bytes: &[u8]) {
+        let free_bytes = self.buff.len() - self.size;
+        let to_push = bytes.len().min(free_bytes);
+        self.buff[self.size..(self.size + to_push)].copy_from_slice(&bytes[..to_push]);
+        self.size += to_push;
+        if to_push < bytes.len() {
+            self.overflowed = true;
+        }
+    }
+
+    pub fn push_byte(&mut self, byte: u8) {
+        if self.size < self.buff.len() {
+            self.buff[self.size] = byte;
+            self.size += 1;
+        } else {
+            self.overflowed = true;
+        }
+    }
+
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+}
+
+impl<'a> core::fmt::Write for BufferWriter<'a> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.push_bytes(s.as_bytes());
+        if self.overflowed() {
+            Err(core::fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum OpCode {
@@ -181,82 +233,6 @@ impl<'a> Packet<'a> {
     }
 }
 
-struct ChunkyReader<R: std::io::Read> {
-    inner: R,
-}
-
-impl<R: std::io::Read> ChunkyReader<R> {
-    pub fn new(inner: R) -> Self {
-        Self { inner }
-    }
-    pub fn try_read_exact(
-        &mut self,
-        mut buf: &mut [u8],
-    ) -> std::result::Result<usize, std::io::Error> {
-        let mut bytes_read = 0;
-        while !buf.is_empty() {
-            match self.inner.read(buf) {
-                Ok(0) => return Ok(bytes_read),
-                Ok(n) => {
-                    let tmp = buf;
-                    bytes_read += n;
-                    buf = &mut tmp[n..];
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(bytes_read)
-    }
-}
-
-pub struct DataStream<R: std::io::Read> {
-    source: ChunkyReader<R>,
-    block_counter: u16,
-    is_finished: bool,
-    buffer: Vec<u8>,
-}
-
-impl<'a, R: std::io::Read> DataStream<R> {
-    pub fn new(source: R, blocksize: u16) -> Self {
-        let mut buffer = vec![0u8; 4 + blocksize as usize];
-        buffer[0..2].copy_from_slice(&(OpCode::Data as u16).to_be_bytes());
-        Self {
-            source: ChunkyReader::new(source),
-            is_finished: false,
-            block_counter: 0,
-            buffer,
-        }
-    }
-    pub fn blocksize(&self) -> usize {
-        self.buffer.len() - 4
-    }
-    pub fn next_raw(&mut self) -> std::io::Result<Option<&[u8]>> {
-        if self.is_finished {
-            return Ok(None);
-        }
-        self.block_counter = self.block_counter.wrapping_add(1);
-        self.buffer[2..4].copy_from_slice(&self.block_counter.to_be_bytes());
-        match self.source.try_read_exact(&mut self.buffer[4..]) {
-            Ok(bytes_read) => {
-                if bytes_read < self.blocksize() {
-                    self.is_finished = true;
-                }
-                Ok(Some(&self.buffer[0..4 + bytes_read]))
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn next_packet(&mut self) -> std::io::Result<Option<Data<'_>>> {
-        self.next_raw().map(|opt| opt.map(Data::from_bytes))
-    }
-
-    pub fn last_block(&self) -> u16 {
-        self.block_counter
-    }
-}
-
 impl<'a> Data<'a> {
     pub fn new(block_nr: u16, data: &'a [u8]) -> Self {
         Self { block_nr, data }
@@ -297,7 +273,7 @@ fn printable_ascii_str_from_u8(data: &[u8]) -> (&str, &[u8]) {
         if data[index] == 0 {
             return unsafe {
                 (
-                    std::str::from_utf8_unchecked(&data[..index]),
+                    core::str::from_utf8_unchecked(&data[..index]),
                     &data[(index + 1).min(data.len())..],
                 )
             };
@@ -419,70 +395,25 @@ impl<'a> Request<'a> {
     }
 
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
-        let mode = b"octets\0";
-        let blksize = b"blksize\0";
-        let tsize = b"tsize\0";
-        let timeout = b"timeout\0";
-        let blocksize_val = self.blocksize.map(|u| {
-            let mut formated = format!("{u}").into_bytes();
-            formated.push(0);
-            formated
-        });
-        let blocksize_n_bytes = if let Some(blocksize) = &blocksize_val {
-            blocksize.len() + blksize.len()
-        } else {
-            0
-        };
-        let timeout_val = self.timeout_seconds.map(|u| {
-            let mut formated = format!("{u}").into_bytes();
-            formated.push(0);
-            formated
-        });
-        let timeout_n_bytes = if let Some(timeout_val) = &timeout_val {
-            timeout_val.len() + timeout.len()
-        } else {
-            0
-        };
-        let tsize_n_bytes = if self.include_transfer_size {
-            tsize.len() + 2
-        } else {
-            0
-        };
-        let name_len = self.filename.len();
-        let mode_len = mode.len();
-        let n_bytes =
-            2 + name_len + 1 + mode_len + blocksize_n_bytes + tsize_n_bytes + timeout_n_bytes;
-
-        if n_bytes > buf.len() {
-            return Err(TftpError::BufferTooSmall);
+        let mut write_target = BufferWriter::new(buf);
+        write_target.push_bytes(&(self.opcode() as u16).to_be_bytes());
+        write_target.push_bytes(self.filename.as_bytes());
+        write_target.push_byte(0);
+        write_target.push_bytes(b"octets\0");
+        if let Some(blocksize) = self.blocksize {
+            let _ = write!(write_target, "blksize\0{blocksize}\0");
         }
-        let opcode = (self.opcode() as u16).to_be_bytes();
-        buf[0..2].copy_from_slice(&opcode);
-        buf[2..2 + name_len].copy_from_slice(self.filename.as_bytes());
-        buf[2 + name_len] = 0;
-        buf[2 + name_len + 1..2 + name_len + 1 + mode_len].copy_from_slice(mode);
-        let offset = 2 + name_len + 1 + mode_len;
-        let offset = if let Some(blocksize) = blocksize_val {
-            buf[offset..offset + blksize.len()].copy_from_slice(blksize);
-            buf[offset + blksize.len()..offset + blksize.len() + blocksize.len()]
-                .copy_from_slice(&blocksize);
-            offset + blksize.len() + blocksize.len()
-        } else {
-            offset
-        };
-        let offset = if let Some(timeout_val) = timeout_val {
-            buf[offset..offset + timeout.len()].copy_from_slice(timeout);
-            buf[offset + timeout.len()..offset + timeout.len() + timeout_val.len()]
-                .copy_from_slice(&timeout_val);
-            timeout_val.len() + timeout.len()
-        } else {
-            offset
-        };
+        if let Some(timeout) = self.timeout_seconds {
+            let _ = write!(write_target, "timeout\0{timeout}\0");
+        }
         if self.include_transfer_size {
-            buf[offset..offset + tsize.len()].copy_from_slice(tsize);
-            buf[offset + tsize.len()..offset + tsize.len() + 2].copy_from_slice(b"0\0");
+            write_target.push_bytes(b"tsize\00\0");
         }
-        Ok(n_bytes)
+        if write_target.overflowed() {
+            Err(TftpError::BufferTooSmall)
+        } else {
+            Ok(write_target.size)
+        }
     }
 
     pub fn unknown_options(&self) -> &[(&str, &str)] {
@@ -607,27 +538,16 @@ impl<'a> OptionAck<'a> {
     }
 
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
-        let blksize = b"blksize\0";
-        let blocksize_val = self.blocksize.map(|u| {
-            let mut formated = format!("{u}").into_bytes();
-            formated.push(0);
-            formated
-        });
-        let blocksize_n_bytes = if let Some(blocksize) = &blocksize_val {
-            blocksize.len() + blksize.len()
+        let mut write_target = BufferWriter::new(buf);
+        write_target.push_bytes(&(OpCode::OptionAck as u16).to_be_bytes());
+        if let Some(blocksize) = self.blocksize {
+            let _ = write!(write_target, "blksize\0{blocksize}\0");
+        }
+        if write_target.overflowed() {
+            Err(TftpError::BufferTooSmall)
         } else {
-            0
-        };
-        let n_bytes = 2 + blocksize_n_bytes; //we ignore unknown options here as we should never send options we don't understand yet.
-        if n_bytes > buf.len() {
-            return Err(TftpError::BufferTooSmall);
+            Ok(write_target.size)
         }
-        buf[0..2].copy_from_slice(&(OpCode::OptionAck as u16).to_be_bytes());
-        if let Some(blocksize) = blocksize_val {
-            buf[2..2 + blksize.len()].copy_from_slice(blksize);
-            buf[2 + blksize.len()..2 + blksize.len() + blocksize.len()].copy_from_slice(&blocksize);
-        }
-        Ok(n_bytes)
     }
 
     pub fn is_empty(&self) -> bool {
