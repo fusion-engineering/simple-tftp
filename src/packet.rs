@@ -1,5 +1,4 @@
-use crate::error::Error as TftpError;
-
+use crate::error::{Error as TftpError, Result as TftpResult};
 #[derive(Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum OpCode {
@@ -46,8 +45,8 @@ impl ErrorCode {
     }
 }
 
-impl std::fmt::Display for ErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
             Self::NOT_DEFINED => f.write_str("Not defined, see error message (if any)"),
             Self::FILE_NOT_FOUND => f.write_str("File not found"),
@@ -72,7 +71,10 @@ pub struct Request<'a> {
     pub blocksize: Option<u16>,
     pub include_transfer_size: bool,
     pub timeout_seconds: Option<u32>,
-    pub unknown_options: Vec<(&'a str, &'a str)>,
+    //from RFC2347, requests can be at most 512 octets.
+    //they must contain a null-terminated name and value, so we divide by 4.
+    // to get an upper bound on the amount of entries
+    unknown_options: arrayvec::ArrayVec<(&'a str, &'a str), { 512 / 4 }>,
 }
 
 //want to use a DST here but transmuting between bytes and DST-fat pointers is undefined.
@@ -100,7 +102,10 @@ pub struct OptionAck<'a> {
     pub blocksize: Option<u16>,
     pub transfer_size: Option<u64>,
     pub timeout_seconds: Option<u32>,
-    pub unknown_options: Vec<(&'a str, &'a str)>,
+    //from RFC2347, requests can be at most 512 octets.
+    //they must contain a null-terminated name and value, so we divide by 4.
+    // to get an upper bound on the amount of entries
+    unknown_options: arrayvec::ArrayVec<(&'a str, &'a str), { 512 / 4 }>,
 }
 
 #[derive(Debug)]
@@ -133,21 +138,25 @@ impl<'a> Packet<'a> {
         Self::Ack(Ack::new(block_nr))
     }
 
-    pub fn from_bytes(data: &'a [u8]) -> Result<Self, TftpError> {
+    pub fn from_bytes(data: &'a [u8]) -> TftpResult<Self> {
         if data.len() < 2 {
             return Err(TftpError::BufferTooSmall);
         }
 
-        OpCode::try_from(u16::from_be_bytes([data[0], data[1]])).map(|opcode| match opcode {
-            OpCode::ReadRequest => Self::Request(Request::from_bytes_skip_opcode_check(data, true)),
-            OpCode::WriteRequest => {
-                Self::Request(Request::from_bytes_skip_opcode_check(data, false))
-            }
-            OpCode::Data => Self::Data(Data::from_bytes_skip_opcode_check(data)),
-            OpCode::Acknowledgement => Self::Ack(Ack::from_bytes_skip_opcode_check(data)),
-            OpCode::Error => Self::Error(Error::from_bytes_skip_opcode_check(data)),
-            OpCode::OptionAck => Self::OptionAck(OptionAck::from_bytes_skip_opcode_check(data)),
-        })
+        OpCode::try_from(u16::from_be_bytes([data[0], data[1]])).map(|opcode| {
+            Ok(match opcode {
+                OpCode::ReadRequest => {
+                    Self::Request(Request::from_bytes_skip_opcode_check(data, true)?)
+                }
+                OpCode::WriteRequest => {
+                    Self::Request(Request::from_bytes_skip_opcode_check(data, false)?)
+                }
+                OpCode::Data => Self::Data(Data::from_bytes_skip_opcode_check(data)),
+                OpCode::Acknowledgement => Self::Ack(Ack::from_bytes_skip_opcode_check(data)),
+                OpCode::Error => Self::Error(Error::from_bytes_skip_opcode_check(data)),
+                OpCode::OptionAck => Self::OptionAck(OptionAck::from_bytes_skip_opcode_check(data)),
+            })
+        })?
     }
 
     pub fn opcode(&self) -> OpCode {
@@ -338,11 +347,11 @@ impl<'a> Request<'a> {
             include_transfer_size: false,
             timeout_seconds: None,
             blocksize,
-            unknown_options: Vec::with_capacity(0),
+            unknown_options: arrayvec::ArrayVec::new(),
         }
     }
 
-    pub fn from_bytes(data: &'a [u8]) -> Self {
+    pub fn from_bytes(data: &'a [u8]) -> TftpResult<Self> {
         let opcode = u16::from_be_bytes([data[0], data[1]]);
         assert!(opcode == OpCode::ReadRequest as u16 || opcode == OpCode::WriteRequest as u16);
         let is_read = if opcode == OpCode::ReadRequest as u16 {
@@ -353,13 +362,13 @@ impl<'a> Request<'a> {
         Self::from_bytes_skip_opcode_check(data, is_read)
     }
 
-    fn from_bytes_skip_opcode_check(data: &'a [u8], is_read: bool) -> Self {
+    fn from_bytes_skip_opcode_check(data: &'a [u8], is_read: bool) -> TftpResult<Self> {
         let (filename, data) = printable_ascii_str_from_u8(&data[2..]);
         let (mode, mut options_data) = printable_ascii_str_from_u8(data);
         let mut blocksize = None;
         let mut include_transfer_size = false;
         let mut timeout_seconds = None;
-        let mut vec = Vec::with_capacity(0);
+        let mut vec = arrayvec::ArrayVec::new();
         while let Some((option, remainder)) = get_option_pair(options_data) {
             if option.0.eq_ignore_ascii_case("blksize") {
                 if blocksize.is_some() {
@@ -378,20 +387,20 @@ impl<'a> Request<'a> {
                 }
                 let timeout = option.1.parse::<u32>().expect("failed to parse time-out");
                 timeout_seconds = Some(timeout);
-            } else {
-                vec.push(option);
+            } else if let Err(_) = vec.try_push(option) {
+                return Err(TftpError::BufferTooSmall);
             }
             options_data = remainder;
         }
         assert!(mode.eq_ignore_ascii_case("octet"));
-        Self {
+        Ok(Self {
             include_transfer_size,
             timeout_seconds,
             unknown_options: vec,
             blocksize,
             is_read,
             filename,
-        }
+        })
     }
 
     pub fn is_read(&self) -> bool {
@@ -475,6 +484,10 @@ impl<'a> Request<'a> {
         }
         Ok(n_bytes)
     }
+
+    pub fn unknown_options(&self) -> &[(&str, &str)] {
+        &self.unknown_options
+    }
 }
 
 impl Ack {
@@ -548,7 +561,7 @@ impl<'a> OptionAck<'a> {
             blocksize,
             transfer_size,
             timeout_seconds: None,
-            unknown_options: Vec::with_capacity(0),
+            unknown_options: arrayvec::ArrayVec::new(),
         }
     }
     pub fn from_bytes(data: &'a [u8]) -> Self {
@@ -558,7 +571,7 @@ impl<'a> OptionAck<'a> {
     }
     fn from_bytes_skip_opcode_check(data: &'a [u8]) -> Self {
         let mut data = &data[2..];
-        let mut vec = Vec::with_capacity(0);
+        let mut vec = arrayvec::ArrayVec::new();
         let mut blocksize = None;
         let mut transfer_size = None;
         let mut timeout_seconds = None;
@@ -622,5 +635,9 @@ impl<'a> OptionAck<'a> {
             && self.timeout_seconds.is_none()
             && self.transfer_size.is_none()
             && self.unknown_options.is_empty()
+    }
+
+    pub fn unknown_options(&self) -> &[(&str, &str)] {
+        &self.unknown_options
     }
 }
