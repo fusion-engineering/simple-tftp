@@ -1,6 +1,3 @@
-//n.b. these features aren't needed to build the library, only the example.
-// the library can be build on stable :)
-#![feature(let_chains, result_flattening)]
 use simple_tftp::{
     packet::{self, OptionAck},
     server::*,
@@ -44,17 +41,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let full_path = local_path.join(&requested_path).canonicalize();
             // and see if the generated path escapes the folder we're serving. This is not TFTP specific
             // but good practice whenever hosting files :)
-            let checked_for_escape = full_path
-                .map(|path| {
-                    if !path.starts_with(local_path) {
-                        Err(std::io::ErrorKind::NotFound.into())
-                    } else {
-                        std::fs::File::open(path)
-                    }
-                })
-                .flatten();
+            let checked_for_escape = full_path.map(|path| {
+                if !path.starts_with(local_path) {
+                    Err(std::io::ErrorKind::NotFound.into())
+                } else {
+                    std::fs::File::open(path)
+                }
+            });
 
-            if let Ok(file) = checked_for_escape {
+            if let Ok(Ok(file)) = checked_for_escape {
                 //if the request asked for the filesize to be included in the opt-ack
                 let file_size = request
                     .include_transfer_size
