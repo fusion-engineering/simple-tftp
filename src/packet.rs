@@ -12,7 +12,7 @@ impl<'a> BufferWriter<'a> {
         Self {
             buff,
             size: 0,
-            overflowed: true,
+            overflowed: false,
         }
     }
 
