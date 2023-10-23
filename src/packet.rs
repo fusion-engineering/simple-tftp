@@ -361,9 +361,6 @@ impl<'a> Request<'a> {
             } else {
                 has_unknown_options = true;
             }
-            // else if let Err(_) = vec.try_push(option) {
-            //     return Err(TftpError::BufferTooSmall);
-            // }
             options_data = remainder;
         }
         assert!(mode.eq_ignore_ascii_case("octet"));
@@ -418,9 +415,12 @@ impl<'a> Request<'a> {
         }
     }
 
-    // pub fn unknown_options(&self) -> &[(&str, &str)] {
-    //     &self.unknown_options
-    // }
+    pub fn unknown_options(&self) -> impl Iterator<Item = (&str, &str)> {
+        OptionsIterator {
+            buff: self.unknown_options,
+        }
+        .unknown()
+    }
 }
 
 impl Ack {
@@ -564,7 +564,35 @@ impl<'a> OptionAck<'a> {
             && self.unknown_options.is_empty()
     }
 
-    // pub fn unknown_options(&self) -> &[(&str, &str)] {
-    //     &self.unknown_options
-    // }
+    pub fn unknown_options(&self) -> impl Iterator<Item = (&str, &str)> {
+        OptionsIterator {
+            buff: self.unknown_options,
+        }
+        .unknown()
+    }
+}
+
+pub struct OptionsIterator<'a> {
+    buff: &'a [u8],
+}
+
+impl<'a> OptionsIterator<'a> {
+    pub fn unknown(self) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.into_iter().filter(|(name, _)| match *name {
+            "blksize" | "timeout" | "tsize" => false,
+            _ => true,
+        })
+    }
+}
+
+impl<'a> Iterator for OptionsIterator<'a> {
+    type Item = (&'a str, &'a str);
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((pair, remainder)) = get_option_pair(self.buff) {
+            self.buff = remainder;
+            Some(pair)
+        } else {
+            None
+        }
+    }
 }
