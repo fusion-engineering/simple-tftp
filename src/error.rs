@@ -3,6 +3,9 @@ pub enum Error {
     BufferTooSmall,
     InvalidOpcode(u16),
     InvalidAck,
+    BadFormatting,
+    OptionRepeated,
+    InvalidBlockSize(u32),
     #[cfg(feature = "std")]
     IoError(std::io::Error),
 }

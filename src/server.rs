@@ -36,7 +36,12 @@ impl Server {
         match self.sock.get_next_message_from()? {
             (Packet::Request(req), addr) => Ok((req, addr)),
             //todo: don't panic here
-            _ => panic!("invalid packet received"),
+            _ => {
+                return Err(IoError::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid packet received",
+                ))
+            }
         }
     }
 
