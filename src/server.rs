@@ -35,7 +35,6 @@ impl Server {
     pub fn get_next_request_from(&mut self) -> IoResult<(Request<'_>, SocketAddr)> {
         match self.sock.get_next_message_from()? {
             (Packet::Request(req), addr) => Ok((req, addr)),
-            //todo: don't panic here
             _ => {
                 return Err(IoError::new(
                     std::io::ErrorKind::InvalidData,
