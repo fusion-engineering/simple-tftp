@@ -29,8 +29,10 @@ pub mod error;
 /// all type definitions needed to parse TFTP packets
 pub mod packet;
 /// a small server implementation
+#[cfg(feature = "std")]
 #[doc(cfg(feature = "std"))]
 pub mod server;
+#[cfg(feature = "std")]
 #[doc(cfg(feature = "std"))]
 pub mod socket;
 
