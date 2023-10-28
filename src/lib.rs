@@ -20,11 +20,15 @@
 //! ❌ [2090 - TFTP Multicast Option](https://www.rfc-editor.org/rfc/rfc2090.html)
 //!
 //!# `#[no_std]` support
-//! This crate is `#[no_std]` by default
+//! This crate is `#[no_std]` by default, exposing only packet and error handling code.
+//! With the `std` feature turned on a small socket interface and server are enabled too.
 #[cfg(feature = "std")]
 mod datastream;
+/// error types for this crate
 pub mod error;
+/// all type definitions needed to parse TFTP packets
 pub mod packet;
+/// a small server implementation
 #[doc(cfg(feature = "std"))]
 pub mod server;
 #[doc(cfg(feature = "std"))]
