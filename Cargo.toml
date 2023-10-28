@@ -8,5 +8,5 @@ authors = ["Hayley Deckers <hayley@fusion.engineering, im@fckn.gay>"]
 [dependencies]
 
 [features]
-default = ["std"]
+default = []
 std = []

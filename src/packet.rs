@@ -1,5 +1,5 @@
 use crate::error::{Error as TftpError, Result as TftpResult};
-use core::fmt::Write;
+use core::{fmt::Write, num::NonZeroU8};
 
 struct BufferWriter<'a> {
     buff: &'a mut [u8],
@@ -51,6 +51,7 @@ impl<'a> core::fmt::Write for BufferWriter<'a> {
     }
 }
 
+/// The 16 bit opcodes used for TFTP packets as defined in [RFC-1350](https://www.rfc-editor.org/rfc/inline-errata/rfc1350.html) section 5 and [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html).
 #[derive(Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum OpCode {
@@ -77,9 +78,16 @@ impl TryFrom<u16> for OpCode {
     }
 }
 
+/// Error codes as defined in the apendix of [RFC-1350](https://www.rfc-editor.org/rfc/inline-errata/rfc1350.html).
+///
+/// Note that these are not exhaustive. When generating an error message that is not defined here, you should
+/// use NOT_DEFINED with a custom error message. The [[Error]] packet can be constructed with any error code however.
+/// In order to let it deal with non-compliant end-points, or newer standards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorCode(u16);
 impl ErrorCode {
+    /// When implementing an endpoint, use this error code to send custom error messages
+    /// that will make sure your implementation won't conflict with any future additions to this list
     pub const NOT_DEFINED: Self = Self(0);
     pub const FILE_NOT_FOUND: Self = Self(1);
     pub const ACCESS_VIOLATION: Self = Self(2);
@@ -90,10 +98,6 @@ impl ErrorCode {
     pub const NO_SUCH_USER: Self = Self(7);
     fn possibly_invalid(code: u16) -> Self {
         Self(code)
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.0 <= 7
     }
 }
 
@@ -115,18 +119,24 @@ impl core::fmt::Display for ErrorCode {
     }
 }
 
+/// A read- or write-request packet.
 #[derive(Debug)]
 pub struct Request<'a> {
     is_read: bool,
+    /// the requested filename. Should be in net-ascii according to the standard but we support utf-8.
     pub filename: &'a str,
     //only the octet mode is supported so it isn't stored here
+    /// The blocksize requested using the options extension defined in [RFC-2348](https://www.rfc-editor.org/rfc/rfc2348.html).
     pub blocksize: Option<u16>,
+    /// If set, the packet will send the size of the file should be to the server (on a write request) or request the file size from the server (on a read request) using the tsize option defined in [RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html)
     pub include_transfer_size: bool,
-    pub timeout_seconds: Option<u32>,
+    /// unsupported, see [RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html) for a definition
+    pub timeout_seconds: Option<NonZeroU8>,
     unknown_options: &'a [u8],
 }
 
-//want to use a DST here but transmuting between bytes and DST-fat pointers is undefined.
+/// a data package holding a reference to it's own slice
+// we'd want to use a DST here but transmuting between bytes and DST-fat pointers is undefined.
 // this representation is great for reading, but not for writting as it can't guarentee the data is contigous
 // splitting into two is cumbersome.
 #[derive(Debug)]
@@ -135,25 +145,31 @@ pub struct Data<'a> {
     data: &'a [u8],
 }
 
+/// an acknowledge packet, send in response to a data packet
 #[derive(Debug)]
 pub struct Ack {
     pub block_nr: u16,
 }
 
+/// and error packet
 #[derive(Debug)]
 pub struct Error<'a> {
     pub error_code: ErrorCode,
     pub message: &'a str,
 }
 
+/// an option acknowledge packet
+///
+/// These are send in response to a read or write request to confirm which optional extension to use for the transfer.
 #[derive(Debug)]
 pub struct OptionAck<'a> {
     pub blocksize: Option<u16>,
     pub transfer_size: Option<u64>,
-    pub timeout_seconds: Option<u32>,
+    pub timeout_seconds: Option<NonZeroU8>,
     unknown_options: &'a [u8],
 }
 
+/// an enum of all types of TFTP packet
 #[derive(Debug)]
 pub enum Packet<'a> {
     Data(Data<'a>),
@@ -164,26 +180,36 @@ pub enum Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
+    /// creates a new data packet with the given `block_nr` and `data`.
     pub fn new_data(block_nr: u16, data: &'a [u8]) -> Self {
         Self::Data(Data::new(block_nr, data))
     }
 
+    /// creates a packet that request to read the file `filename` in chunks of `blocksize` bytes.
+    /// if `blocksize` is `None` no specific blocksize is requested from the end-point and 512 should be used as the default blocksize
     pub fn new_read_request(filename: &'a str, blocksize: Option<u16>) -> Self {
         Self::Request(Request::new_read_request(filename, blocksize))
     }
 
+    /// creates a packet that request to write the file `filename` in chunks of `blocksize` bytes.
+    /// if `blocksize` is `None` no specific blocksize is requested from the end-point and 512 should be used as the default blocksize
     pub fn new_write_request(filename: &'a str, blocksize: Option<u16>) -> Self {
         Self::Request(Request::new_write_request(filename, blocksize))
     }
 
+    /// creates an error packet with the given code and message.
     pub fn new_error(error_code: ErrorCode, message: &'a str) -> Self {
         Self::Error(Error::new(error_code, message))
     }
 
+    /// creates an acknowledge packet for data packet number `block_nr`.
     pub fn new_ack(block_nr: u16) -> Self {
         Self::Ack(Ack::new(block_nr))
     }
 
+    /// creates a packet from a data buffer.
+    /// the first two bytes should be the 16-byte big-endian opcode.
+    /// the buffer is allowed to be bigger than the TFTP packet.
     pub fn from_bytes(data: &'a [u8]) -> TftpResult<Self> {
         if data.len() < 2 {
             return Err(TftpError::BufferTooSmall);
@@ -197,8 +223,8 @@ impl<'a> Packet<'a> {
                 OpCode::WriteRequest => {
                     Self::Request(Request::from_bytes_skip_opcode_check(data, false)?)
                 }
-                OpCode::Data => Self::Data(Data::from_bytes_skip_opcode_check(data)),
-                OpCode::Acknowledgement => Self::Ack(Ack::from_bytes_skip_opcode_check(data)),
+                OpCode::Data => Self::Data(Data::from_bytes_skip_opcode_check(data)?),
+                OpCode::Acknowledgement => Self::Ack(Ack::from_bytes_skip_opcode_check(data)?),
                 OpCode::Error => Self::Error(Error::from_bytes_skip_opcode_check(data)?),
                 OpCode::OptionAck => {
                     Self::OptionAck(OptionAck::from_bytes_skip_opcode_check(data)?)
@@ -207,6 +233,7 @@ impl<'a> Packet<'a> {
         })?
     }
 
+    /// returns the opcode of the packet.
     pub fn opcode(&self) -> OpCode {
         match self {
             Self::Ack(_) => OpCode::Acknowledgement,
@@ -218,6 +245,8 @@ impl<'a> Packet<'a> {
         }
     }
 
+    /// write this packet into the buffer `data`. The buffer is allowed to be larger than the packet size.
+    /// Will return [TftpError::BufferTooSmall] if the packet doesn't fit but might still mutate the buffer.
     pub fn to_bytes(&self, data: &'a mut [u8]) -> Result<usize, TftpError> {
         match self {
             Self::Ack(x) => x.to_bytes(data),
@@ -230,22 +259,22 @@ impl<'a> Packet<'a> {
 }
 
 impl<'a> Data<'a> {
+    /// creates a new data packet with the given block number and data.
     pub fn new(block_nr: u16, data: &'a [u8]) -> Self {
         Self { block_nr, data }
     }
 
-    pub fn from_bytes(data: &'a [u8]) -> Self {
-        let opcode = u16::from_be_bytes([data[0], data[1]]);
-        assert_eq!(opcode, OpCode::Data as u16);
-        Self::from_bytes_skip_opcode_check(data)
-    }
-
-    fn from_bytes_skip_opcode_check(data: &'a [u8]) -> Self {
+    fn from_bytes_skip_opcode_check(data: &'a [u8]) -> TftpResult<Self> {
+        if data.len() < 4 {
+            return Err(TftpError::BufferTooSmall);
+        }
         let block_nr = u16::from_be_bytes([data[2], data[3]]);
         let data = &data[4..];
-        Self { block_nr, data }
+        Ok(Self { block_nr, data })
     }
 
+    /// write this packet into the buffer `data`. The buffer is allowed to be larger than the packet size.
+    /// Will return [TftpError::BufferTooSmall] if the packet doesn't fit but might still mutate the buffer.
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
         let n_bytes = 4 + self.data.len();
         if n_bytes > buf.len() {
@@ -259,7 +288,6 @@ impl<'a> Data<'a> {
 }
 
 // todo: PR alterinative from_bytes functions for Cstr, possibly include direct str conversion.
-// todo: validate netascii?
 // The data is supposed to be netascii, a really outdated format. no good reason to limit ourselves to it aside from "the standard says so"
 // and this function will usually be called on data generated by a remote host, which may not be compliant itself
 // and instead send utf-8 or 'normal' ascii.
@@ -301,14 +329,17 @@ fn parse_blocksize(as_str: &str) -> TftpResult<u16> {
 }
 
 impl<'a> Request<'a> {
+    /// creates a new read request packet for the given file, optionally request a specific blocksize using the blocksize option defined in [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html) and [RFC-2348](https://www.rfc-editor.org/rfc/rfc2348.html)
     pub fn new_read_request(filename: &'a str, blocksize: Option<u16>) -> Self {
         Self::new_request(filename, blocksize, true)
     }
 
+    /// creates a new write request packet for the given file, optionally request a specific blocksize using the blocksize option defined in [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html) and [RFC-2348](https://www.rfc-editor.org/rfc/rfc2348.html)
     pub fn new_write_request(filename: &'a str, blocksize: Option<u16>) -> Self {
         Self::new_request(filename, blocksize, false)
     }
 
+    /// creates a new read or write request packet for the given file, optionally request a specific blocksize using the blocksize option defined in [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html) and [RFC-2348](https://www.rfc-editor.org/rfc/rfc2348.html)
     fn new_request(filename: &'a str, blocksize: Option<u16>, is_read: bool) -> Self {
         Self {
             is_read,
@@ -318,17 +349,6 @@ impl<'a> Request<'a> {
             blocksize,
             unknown_options: &[],
         }
-    }
-
-    pub fn from_bytes(data: &'a [u8]) -> TftpResult<Self> {
-        let opcode = u16::from_be_bytes([data[0], data[1]]);
-        assert!(opcode == OpCode::ReadRequest as u16 || opcode == OpCode::WriteRequest as u16);
-        let is_read = if opcode == OpCode::ReadRequest as u16 {
-            true
-        } else {
-            false
-        };
-        Self::from_bytes_skip_opcode_check(data, is_read)
     }
 
     fn from_bytes_skip_opcode_check(data: &'a [u8], is_read: bool) -> TftpResult<Self> {
@@ -357,7 +377,7 @@ impl<'a> Request<'a> {
                 if timeout_seconds.is_some() {
                     return Err(TftpError::OptionRepeated);
                 }
-                let Ok(timeout) = option.1.parse::<u32>() else {
+                let Ok(timeout) = option.1.parse() else {
                     return Err(TftpError::BadFormatting);
                 };
                 timeout_seconds = Some(timeout);
@@ -366,7 +386,9 @@ impl<'a> Request<'a> {
             }
             options_data = remainder;
         }
-        assert!(mode.eq_ignore_ascii_case("octet"));
+        if !mode.eq_ignore_ascii_case("octet") {
+            return Err(TftpError::BadFormatting);
+        }
         Ok(Self {
             include_transfer_size,
             timeout_seconds,
@@ -381,9 +403,11 @@ impl<'a> Request<'a> {
         })
     }
 
+    /// returns true if this packet is a read request.
     pub fn is_read(&self) -> bool {
         self.is_read
     }
+    /// returns true if this packet is a write request.
     pub fn is_write(&self) -> bool {
         !self.is_read()
     }
@@ -396,6 +420,8 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// write this packet into the buffer `data`. The buffer is allowed to be larger than the packet size.
+    /// Will return [TftpError::BufferTooSmall] if the packet doesn't fit but might still mutate the buffer.
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
         let mut write_target = BufferWriter::new(buf);
         write_target.push_bytes(&(self.opcode() as u16).to_be_bytes());
@@ -418,6 +444,9 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// returns an iterator over all the options in this packet that this library does not know about.
+    /// This iterator returns a result over tuple pairs of option names and values. Will return an error if either of these is not a null-terminated ascii string.
+    /// see [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html) for a definition of options.
     pub fn unknown_options(&self) -> impl Iterator<Item = TftpResult<(&str, &str)>> {
         OptionsIterator {
             buff: self.unknown_options,
@@ -430,21 +459,16 @@ impl Ack {
     pub fn new(block_nr: u16) -> Self {
         Self { block_nr }
     }
-    pub fn from_bytes(data: &[u8]) -> Self {
-        let opcode = u16::from_be_bytes([data[0], data[1]]);
-        assert_eq!(opcode, OpCode::Acknowledgement as u16);
-        Self::from_bytes_skip_opcode_check(data)
-    }
-
-    fn from_bytes_skip_opcode_check(data: &[u8]) -> Self {
-        //todo: bounds checking
+    fn from_bytes_skip_opcode_check(data: &[u8]) -> TftpResult<Self> {
+        if data.len() < 4 {
+            return Err(TftpError::BufferTooSmall);
+        }
         let block_nr = u16::from_be_bytes([data[2], data[3]]);
-        Self { block_nr }
+        Ok(Self { block_nr })
     }
 
     pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, TftpError> {
         let n_bytes = 4;
-        assert!(buf.len() >= n_bytes);
         if buf.len() >= n_bytes {
             buf[0..2].copy_from_slice(&(OpCode::Error as u16).to_be_bytes());
             buf[2..4].copy_from_slice(&self.block_nr.to_be_bytes());
@@ -462,14 +486,10 @@ impl<'a> Error<'a> {
             message,
         }
     }
-
-    pub fn from_bytes(data: &'a [u8]) -> TftpResult<Self> {
-        let opcode = u16::from_be_bytes([data[0], data[1]]);
-        assert_eq!(opcode, OpCode::Error as u16);
-        Self::from_bytes_skip_opcode_check(data)
-    }
-
     fn from_bytes_skip_opcode_check(data: &'a [u8]) -> TftpResult<Self> {
+        if data.len() < 4 {
+            return Err(TftpError::BufferTooSmall);
+        }
         let error_code = ErrorCode::possibly_invalid(u16::from_be_bytes([data[2], data[3]]));
         Ok(Self {
             error_code,
@@ -499,11 +519,6 @@ impl<'a> OptionAck<'a> {
             timeout_seconds: None,
             unknown_options: &[],
         }
-    }
-    pub fn from_bytes(data: &'a [u8]) -> TftpResult<Self> {
-        let opcode = u16::from_be_bytes([data[0], data[1]]);
-        assert_eq!(opcode, OpCode::OptionAck as u16);
-        Self::from_bytes_skip_opcode_check(data)
     }
     fn from_bytes_skip_opcode_check(data: &'a [u8]) -> TftpResult<Self> {
         let mut data = &data[2..];
@@ -551,6 +566,8 @@ impl<'a> OptionAck<'a> {
         })
     }
 
+    /// write this packet into the buffer `data`. The buffer is allowed to be larger than the packet size.
+    /// Will return [TftpError::BufferTooSmall] if the packet doesn't fit but might still mutate the buffer.
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
         let mut write_target = BufferWriter::new(buf);
         write_target.push_bytes(&(OpCode::OptionAck as u16).to_be_bytes());
@@ -564,6 +581,7 @@ impl<'a> OptionAck<'a> {
         }
     }
 
+    ///returns true if this packet has any options set.
     pub fn is_empty(&self) -> bool {
         self.blocksize.is_none()
             && self.timeout_seconds.is_none()
@@ -571,6 +589,9 @@ impl<'a> OptionAck<'a> {
             && self.unknown_options.is_empty()
     }
 
+    /// returns an iterator over all the options in this packet that this library does not know about.
+    /// This iterator returns a result over tuple pairs of option names and values. Will return an error if either of these is not a null-terminated ascii string.
+    /// see [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html) for a definition of options.
     pub fn unknown_options(&self) -> impl Iterator<Item = TftpResult<(&str, &str)>> {
         OptionsIterator {
             buff: self.unknown_options,
@@ -579,11 +600,13 @@ impl<'a> OptionAck<'a> {
     }
 }
 
+/// an iterator over name-value pairs of options in a read/write-request packet or option-acknowledge packet
 pub struct OptionsIterator<'a> {
     buff: &'a [u8],
 }
 
 impl<'a> OptionsIterator<'a> {
+    /// iterate only over the options that are not understood by this crate (i.e. anything but `blksize`, `timeout` and `tsize`).
     pub fn unknown(self) -> impl Iterator<Item = TftpResult<(&'a str, &'a str)>> {
         self.into_iter().filter(|x| match x {
             Ok((name, _)) => match *name {

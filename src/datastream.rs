@@ -1,4 +1,4 @@
-use crate::packet::{Data, OpCode};
+use crate::packet::OpCode;
 
 struct ChunkyReader<R: std::io::Read> {
     inner: R,
@@ -29,7 +29,9 @@ impl<R: std::io::Read> ChunkyReader<R> {
     }
 }
 
-pub struct DataStream<R: std::io::Read> {
+/// Wrapper around a source that implements [std::io::Read] that can be used to read out fixed size chunks at a time.
+/// similar to the chunks method on slices. This struct serves as a helper for splitting a stream like source into packets.
+pub(crate) struct DataStream<R: std::io::Read> {
     source: ChunkyReader<R>,
     block_counter: u16,
     is_finished: bool,
@@ -37,6 +39,7 @@ pub struct DataStream<R: std::io::Read> {
 }
 
 impl<'a, R: std::io::Read> DataStream<R> {
+    /// creates a new DataStream that will split the source up into chunks of blocksize bytes.
     pub fn new(source: R, blocksize: u16) -> Self {
         let mut buffer = vec![0u8; 4 + blocksize as usize];
         buffer[0..2].copy_from_slice(&(OpCode::Data as u16).to_be_bytes());
@@ -47,10 +50,13 @@ impl<'a, R: std::io::Read> DataStream<R> {
             buffer,
         }
     }
+
+    /// returns the blocksize of this DataStream
     pub fn blocksize(&self) -> usize {
         self.buffer.len() - 4
     }
-    pub fn next_raw(&mut self) -> std::io::Result<Option<&[u8]>> {
+
+    pub(crate) fn next_raw(&mut self) -> std::io::Result<Option<&[u8]>> {
         if self.is_finished {
             return Ok(None);
         }
@@ -65,10 +71,6 @@ impl<'a, R: std::io::Read> DataStream<R> {
             }
             Err(e) => Err(e),
         }
-    }
-
-    pub fn next_packet(&mut self) -> std::io::Result<Option<Data<'_>>> {
-        self.next_raw().map(|opt| opt.map(Data::from_bytes))
     }
 
     pub fn last_block(&self) -> u16 {

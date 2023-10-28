@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 //spawn this transfer onto a thread, so that multiple transfers can be handled at once.
                 std::thread::spawn(move || {
                     if let Err(e) = transfer.finish() {
-                        //an error can occur for three reasons:
+                        //an error can occur for 4 reasons:
                         // 1. we have hit an io-error reading the file,
                         // 2. we hit an io-error while doing udp transfers
                         // 3. or the client has send us an error packet during the transfer,
