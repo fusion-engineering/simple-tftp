@@ -7,6 +7,7 @@ pub enum Error {
     OptionRepeated,
     InvalidBlockSize(u32),
     #[cfg(feature = "std")]
+    #[doc(cfg(feature = "std"))]
     IoError(std::io::Error),
 }
 
