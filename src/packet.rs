@@ -54,6 +54,7 @@ impl<'a> core::fmt::Write for BufferWriter<'a> {
 /// The 16 bit opcodes used for TFTP packets as defined in [RFC-1350](https://www.rfc-editor.org/rfc/inline-errata/rfc1350.html) section 5 and [RFC-2347](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html).
 #[derive(Debug, Eq, PartialEq)]
 #[repr(u16)]
+#[allow(missing_docs)]
 pub enum OpCode {
     ReadRequest = 1,
     WriteRequest = 2,
@@ -89,12 +90,19 @@ impl ErrorCode {
     /// When implementing an endpoint, use this error code to send custom error messages
     /// that will make sure your implementation won't conflict with any future additions to this list
     pub const NOT_DEFINED: Self = Self(0);
+    /// File not found.
     pub const FILE_NOT_FOUND: Self = Self(1);
+    /// Access violation.
     pub const ACCESS_VIOLATION: Self = Self(2);
+    /// Disk full or allocation exceeded.
     pub const DISK_FULL_OR_ALLOCATION_EXCEEDED: Self = Self(3);
+    /// Illegal TFTP operation.
     pub const ILLEGAL_TFTP_OPERATION: Self = Self(4);
+    /// Unknown transfer ID.
     pub const UNKNOWN_TRANSFER_ID: Self = Self(5);
+    /// File already exists.
     pub const FILE_ALREADY_EXISTS: Self = Self(6);
+    /// No such user.
     pub const NO_SUCH_USER: Self = Self(7);
     fn possibly_invalid(code: u16) -> Self {
         Self(code)
@@ -120,6 +128,8 @@ impl core::fmt::Display for ErrorCode {
 }
 
 /// A read- or write-request packet.
+///
+/// Will always use the octer mode. netascii mode is not supported.
 #[derive(Debug)]
 pub struct Request<'a> {
     is_read: bool,
@@ -135,10 +145,7 @@ pub struct Request<'a> {
     unknown_options: &'a [u8],
 }
 
-/// a data package holding a reference to it's own slice
-// we'd want to use a DST here but transmuting between bytes and DST-fat pointers is undefined.
-// this representation is great for reading, but not for writting as it can't guarentee the data is contigous
-// splitting into two is cumbersome.
+/// A data package that borrows a slice of data
 #[derive(Debug)]
 pub struct Data<'a> {
     block_nr: u16,
@@ -148,13 +155,22 @@ pub struct Data<'a> {
 /// an acknowledge packet, send in response to a data packet
 #[derive(Debug)]
 pub struct Ack {
+    /// the block_nr of the data packet being ack'ed.
+    /// A write request is acked with a block_nr of 0.
     pub block_nr: u16,
 }
 
-/// and error packet
+/// An error packet
 #[derive(Debug)]
 pub struct Error<'a> {
+    /// The specific error code. See [`ErrorCode`] for details.
     pub error_code: ErrorCode,
+    // todo: should be (net)ascii?
+    /// The human read-able error message associated with this string.
+    /// Note that as per the spec, it should be ascii:
+    /// > The error message is intended for human consumption, and
+    /// > should be in netascii.  Like all other strings, it is terminated with
+    /// > a zero byte.
     pub message: &'a str,
 }
 
@@ -163,19 +179,30 @@ pub struct Error<'a> {
 /// These are send in response to a read or write request to confirm which optional extension to use for the transfer.
 #[derive(Debug)]
 pub struct OptionAck<'a> {
+    /// Indicates acknowledgement of a specific blocksize requested using the options extension defined in [RFC-2348](https://www.rfc-editor.org/rfc/rfc2348.html) if present.
     pub blocksize: Option<u16>,
+    /// If set, indicates the acknowledgement of the tsize options extension as defined in [RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html).
+    /// On a read request, the value of the field will be set to the size of the requested file. On a write request it will echo back the size reported by the client.
+    /// If the packet is too larger, either side may abort the transfer with an [Error] packet with code [`ErrorCode::DISK_FULL_OR_ALLOCATION_EXCEEDED`].
     pub transfer_size: Option<u64>,
+    /// If set, indicates acknowledgement of timeour option extension as defined in [RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html)
     pub timeout_seconds: Option<NonZeroU8>,
+    /// options which aren't understood by this library
     unknown_options: &'a [u8],
 }
 
 /// an enum of all types of TFTP packet
 #[derive(Debug)]
 pub enum Packet<'a> {
+    /// A data package that borrows a slice of data,
     Data(Data<'a>),
+    /// A read- or write-request packet,
     Request(Request<'a>),
+    /// An error packet indicating something went wrong,
     Error(Error<'a>),
+    /// An acknowledge packet, send in response to a data packet,
     Ack(Ack),
+    /// An option acknowledge packet, acknowledging options request with a read- or write-request packet,
     OptionAck(OptionAck<'a>),
 }
 
@@ -456,9 +483,11 @@ impl<'a> Request<'a> {
 }
 
 impl Ack {
+    /// creates a new Ack packet with the given block number.
     pub fn new(block_nr: u16) -> Self {
         Self { block_nr }
     }
+
     fn from_bytes_skip_opcode_check(data: &[u8]) -> TftpResult<Self> {
         if data.len() < 4 {
             return Err(TftpError::BufferTooSmall);
@@ -467,6 +496,7 @@ impl Ack {
         Ok(Self { block_nr })
     }
 
+    /// write this packet into the provided buffer. On success returns the amounts of bytes written. If the buffer is too small to hold the packet, returns an [TftpError::BufferTooSmall] error.
     pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, TftpError> {
         let n_bytes = 4;
         if buf.len() >= n_bytes {
@@ -480,6 +510,7 @@ impl Ack {
 }
 
 impl<'a> Error<'a> {
+    /// creates a new error packtet with the given [ErrorCode] and message.
     pub fn new(error_code: ErrorCode, message: &'a str) -> Self {
         Self {
             error_code,
@@ -496,6 +527,7 @@ impl<'a> Error<'a> {
             message: printable_ascii_str_from_u8(&data[4..])?.0,
         })
     }
+    /// write this packet into the provided buffer. On success returns the amounts of bytes written. If the buffer is too small to hold the packet, returns an [TftpError::BufferTooSmall] error.
     pub fn to_bytes(&self, buf: &'a mut [u8]) -> Result<usize, TftpError> {
         let n_bytes = 4 + self.message.len() + 1;
         if n_bytes > buf.len() {
@@ -510,6 +542,7 @@ impl<'a> Error<'a> {
 }
 
 impl<'a> OptionAck<'a> {
+    /// Creates an Option Ack packet, optionally including a blocksize as defined in [RFC-2348](https://datatracker.ietf.org/doc/html/rfc2348) or transfer size as defined in [RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html).
     pub fn new(blocksize: Option<u16>, transfer_size: Option<u64>) -> Self {
         //can't _construct_ an option ack with unknown fields because the server wouldn't know how to handle them.
         // we don't support timeouts in the server either, so we don't construct those either.

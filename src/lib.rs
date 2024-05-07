@@ -1,5 +1,6 @@
 #![feature(doc_cfg)]
 #![cfg_attr(not(feature = "std"), no_std)]
+#![warn(missing_docs)]
 
 //! A crate that contains everything you need to build a small TFTP server or client.
 //! It aims to be easy to use / read over over performant.
@@ -34,6 +35,8 @@ pub mod packet;
 pub mod server;
 #[cfg(feature = "std")]
 #[doc(cfg(feature = "std"))]
+/// A wrapper around a UDP socket that can be used to build a client or server,
 pub mod socket;
 
+pub use error::Result;
 pub use packet::Packet;
