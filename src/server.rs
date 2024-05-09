@@ -58,6 +58,12 @@ impl Server {
         source: R,
         options: OptionAck<'static>,
     ) -> IoResult<Transfer<R>> {
+        if options.timeout_seconds.is_some() {
+            return Err(IoError::new(
+                std::io::ErrorKind::Other,
+                "Server does not support setting a time-out",
+            ));
+        }
         Transfer::new(source, self.sock.sock.local_addr()?.ip(), target, options)
     }
 

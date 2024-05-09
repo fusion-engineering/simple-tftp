@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let transfer = server.create_transfer_to(
                     client_addr,
                     file,
-                    OptionAck::new(block_size, file_size),
+                    OptionAck::new(block_size, file_size, None),
                 )?;
                 //spawn this transfer onto a thread, so that multiple transfers can be handled at once.
                 std::thread::spawn(move || {
