@@ -541,18 +541,25 @@ impl<'a> Error<'a> {
     }
 }
 
-impl<'a> OptionAck<'a> {
-    /// Creates an Option Ack packet, optionally including a blocksize as defined in [RFC-2348](https://datatracker.ietf.org/doc/html/rfc2348) or transfer size as defined in [RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html).
-    pub fn new(blocksize: Option<u16>, transfer_size: Option<u64>) -> Self {
+impl OptionAck<'static> {
+    /// Creates an Option Ack packet, optionally including a blocksize as defined in [RFC-2348](https://datatracker.ietf.org/doc/html/rfc2348), transfer size([RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html)), or timeout ([RFC-2349](https://www.rfc-editor.org/rfc/rfc2349.html)).
+    pub fn new(
+        blocksize: Option<u16>,
+        transfer_size: Option<u64>,
+        timeout_seconds: Option<NonZeroU8>,
+    ) -> Self {
         //can't _construct_ an option ack with unknown fields because the server wouldn't know how to handle them.
         // we don't support timeouts in the server either, so we don't construct those either.
         Self {
             blocksize,
             transfer_size,
-            timeout_seconds: None,
+            timeout_seconds,
             unknown_options: &[],
         }
     }
+}
+
+impl<'a> OptionAck<'a> {
     fn from_bytes_skip_opcode_check(data: &'a [u8]) -> TftpResult<Self> {
         let mut data = &data[2..];
         let mut blocksize = None;
