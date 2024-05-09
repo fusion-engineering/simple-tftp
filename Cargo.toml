@@ -6,3 +6,11 @@ authors = ["Hayley Deckers <hayley@fusion.engineering, im@fckn.gay>"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+[features]
+default = []
+std = []
+
+[[example]]
+name = "server"
+required-features = ["std"]

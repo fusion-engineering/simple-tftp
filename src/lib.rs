@@ -1,66 +1,42 @@
-use std::{
-    io::{Error as IoError, Result as IoResult},
-    net::{SocketAddr, UdpSocket},
-};
+#![feature(doc_cfg)]
+#![cfg_attr(not(feature = "std"), no_std)]
+#![warn(missing_docs)]
 
+//! A crate that contains everything you need to build a small TFTP server or client.
+//! It aims to be easy to use / read over over performant.
+//! # What is TFTP?
+//! TFTP is an older protocol for transfering files over the network defined in [RFC-1350: The TFTP Protocol (Revision 2)](https://www.rfc-editor.org/rfc/inline-errata/rfc1350.html). These days it is mainly used to boot or flash embedded devices over ethernet.
+//!
+//!# Supported RFCs
+//! ✅ [1350 - The TFTP Protocol (Revision 2)](https://www.rfc-editor.org/rfc/inline-errata/rfc1350.html)
+//!
+//! ✅ [2347 - TFTP Option Extension](https://www.rfc-editor.org/rfc/inline-errata/rfc2347.html)
+//!
+//! ✅ [2348 - TFTP Blocksize Option](https://www.rfc-editor.org/rfc/rfc2348.html)
+//!
+//! ⚠️ [2349 - TFTP Timeout Interval and Transfer Size Options](https://www.rfc-editor.org/rfc/rfc2349.html)
+//!
+//! ╰Timeout option is recognized by the packet parser, but not supported by the server.
+//!
+//! ❌ [2090 - TFTP Multicast Option](https://www.rfc-editor.org/rfc/rfc2090.html)
+//!
+//!# `#[no_std]` support
+//! This crate is `#[no_std]` by default, exposing only packet and error handling code.
+//! With the `std` feature turned on a small socket interface and server are enabled too.
+#[cfg(feature = "std")]
+mod datastream;
+/// error types for this crate
 pub mod error;
+/// all type definitions needed to parse TFTP packets
 pub mod packet;
+/// a small server implementation
+#[cfg(feature = "std")]
+#[doc(cfg(feature = "std"))]
 pub mod server;
+#[cfg(feature = "std")]
+#[doc(cfg(feature = "std"))]
+/// A wrapper around a UDP socket that can be used to build a client or server,
+pub mod socket;
 
-use packet::Packet;
-
-/// Wraps a UDP socket + buffer and exposes methods common to both server and client for reading and sending messages.
-struct TFTPSocket {
-    sock: UdpSocket,
-    buffer: Vec<u8>,
-}
-
-impl TFTPSocket {
-    pub fn new(bind_addr: SocketAddr, connect_addr: Option<SocketAddr>) -> std::io::Result<Self> {
-        let sock = UdpSocket::bind(bind_addr)?;
-        if let Some(addr) = connect_addr {
-            sock.connect(addr)?
-        }
-        Ok(Self {
-            sock,
-            buffer: vec![0u8; 0xFFFF],
-        })
-    }
-
-    pub fn get_next_message_from(&mut self) -> IoResult<(Packet<'_>, SocketAddr)> {
-        let (n_bytes, client_addres) = self.sock.recv_from(&mut self.buffer)?;
-        let message_buffer = &self.buffer[..n_bytes];
-        Packet::from_bytes(message_buffer)
-            .map_err(|_| IoError::new(std::io::ErrorKind::InvalidData, "invalid packet received"))
-            .map(|a| (a, client_addres))
-    }
-
-    pub fn send_message_to(&mut self, message: Packet, addr: SocketAddr) -> IoResult<()> {
-        self.send_message_optionally_to(message, Some(addr))
-    }
-    pub fn send_message(&mut self, message: Packet) -> Result<(), IoError> {
-        self.send_message_optionally_to(message, None)
-    }
-
-    pub fn send_message_optionally_to(
-        &mut self,
-        message: Packet,
-        addr: Option<SocketAddr>,
-    ) -> Result<(), IoError> {
-        let bytes = message.to_bytes(&mut self.buffer).unwrap();
-        let message = &self.buffer[..bytes];
-        let bytes_send = if let Some(addr) = addr {
-            UdpSocket::send_to(&self.sock, message, addr)
-        } else {
-            UdpSocket::send(&self.sock, message)
-        }?;
-        if bytes_send == message.len() {
-            Ok(())
-        } else {
-            Err(IoError::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to send UDP packet of size {bytes_send}"),
-            ))
-        }
-    }
-}
+pub use error::Result;
+pub use packet::Packet;
