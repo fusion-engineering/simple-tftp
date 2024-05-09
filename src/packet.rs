@@ -607,6 +607,12 @@ impl<'a> OptionAck<'a> {
         if let Some(blocksize) = self.blocksize {
             let _ = write!(write_target, "blksize\0{blocksize}\0");
         }
+        if let Some(tsize) = self.transfer_size {
+            let _ = write!(write_target, "tsize\0{tsize}\0");
+        }
+        if let Some(timeout) = self.timeout_seconds {
+            let _ = write!(write_target, "timeout\0{timeout}\0");
+        }
         if write_target.overflowed() {
             Err(TftpError::BufferTooSmall)
         } else {
