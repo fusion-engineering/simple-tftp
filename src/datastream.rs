@@ -8,6 +8,8 @@ impl<R: std::io::Read> ChunkyReader<R> {
     pub fn new(inner: R) -> Self {
         Self { inner }
     }
+    /// similar to https://doc.rust-lang.org/std/io/trait.Read.html#method.read_exact
+    /// but will will return Ok(bytes_read) when it encounters an EOF before filling the buffer
     pub fn try_read_exact(
         &mut self,
         mut buf: &mut [u8],
@@ -22,6 +24,7 @@ impl<R: std::io::Read> ChunkyReader<R> {
                     buf = &mut tmp[n..];
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e),
             }
         }
@@ -69,11 +72,50 @@ impl<'a, R: std::io::Read> DataStream<R> {
                 }
                 Ok(Some(&self.buffer[0..4 + bytes_read]))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.is_finished = true;
+                Err(e)
+            }
         }
     }
 
     pub fn last_block(&self) -> u16 {
         self.block_counter
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    #[test]
+    fn reader() {
+        let source = b"aaaabbbbccccddddeeeexxx";
+        let mut buff = [0; 4];
+        let mut reader = ChunkyReader::new(&source[..]);
+        let n = reader.try_read_exact(&mut buff).unwrap();
+        assert_eq!(&buff[..n], "aaaa".as_bytes());
+        let n = reader.try_read_exact(&mut buff).unwrap();
+        assert_eq!(&buff[..n], "bbbb".as_bytes());
+        let n = reader.try_read_exact(&mut buff).unwrap();
+        assert_eq!(&buff[..n], "cccc".as_bytes());
+        let n = reader.try_read_exact(&mut buff).unwrap();
+        assert_eq!(&buff[..n], "dddd".as_bytes());
+        let n = reader.try_read_exact(&mut buff).unwrap();
+        assert_eq!(&buff[..n], "eeee".as_bytes());
+        let n = reader.try_read_exact(&mut buff).unwrap();
+        assert_eq!(&buff[..n], "xxx".as_bytes());
+    }
+
+    #[test]
+    fn datastream_blocksize() {
+        let source = b"aaaabbbbccccddddeeeexxx";
+        for bs in &[0, 3, 4, 7, 999, u16::MAX] {
+            let ds = DataStream::new(&source[..], *bs);
+            assert_eq!(ds.blocksize(), *bs as usize)
+        }
+    }
+
+    //todo: add tests for the error cases
+    // e.g. implement a reader that fails after a few bytes and check that it doesn't return garbage
 }
