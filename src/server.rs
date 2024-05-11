@@ -23,7 +23,7 @@ impl Server {
     /// creates a new server bound to ip address `ip` and port `port`.
     pub fn connect_with_port(ip: IpAddr, port: u16) -> IoResult<Self> {
         Ok(Self {
-            sock: TFTPSocket::new(SocketAddr::new(ip, port), None)?,
+            sock: TFTPSocket::new(SocketAddr::new(ip, port), None, 0xFFFF)?,
         })
     }
 
@@ -95,7 +95,11 @@ impl<R: Read> Transfer<R> {
         options: OptionAck<'static>,
     ) -> IoResult<Self> {
         Ok(Self {
-            sock: TFTPSocket::new(SocketAddr::new(ip, 0), Some(target))?,
+            sock: TFTPSocket::new(
+                SocketAddr::new(ip, 0),
+                Some(target),
+                512 + (options.blocksize.unwrap_or(512) as usize),
+            )?,
             source: DataStream::new(source, options.blocksize.unwrap_or(512)),
             options,
         })

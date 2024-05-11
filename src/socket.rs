@@ -14,14 +14,18 @@ pub struct TFTPSocket {
 impl TFTPSocket {
     /// creates a new UDP socket bound to `bind_addr` and optionally connects it to `connect_addr`.
     /// note that the default port for TFTP is 69.
-    pub fn new(bind_addr: SocketAddr, connect_addr: Option<SocketAddr>) -> std::io::Result<Self> {
+    pub fn new(
+        bind_addr: SocketAddr,
+        connect_addr: Option<SocketAddr>,
+        buffer_size: usize,
+    ) -> std::io::Result<Self> {
         let sock = UdpSocket::bind(bind_addr)?;
         if let Some(addr) = connect_addr {
             sock.connect(addr)?
         }
         Ok(Self {
             sock,
-            buffer: vec![0u8; 0xFFFF],
+            buffer: vec![0u8; buffer_size],
         })
     }
 
@@ -30,7 +34,12 @@ impl TFTPSocket {
         let (n_bytes, client_addres) = self.sock.recv_from(&mut self.buffer)?;
         let message_buffer = &self.buffer[..n_bytes];
         Packet::from_bytes(message_buffer)
-            .map_err(|_| IoError::new(std::io::ErrorKind::InvalidData, "invalid packet received"))
+            .map_err(|err| {
+                IoError::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid packet received: {err:?}"),
+                )
+            })
             .map(|a| (a, client_addres))
     }
 
