@@ -477,6 +477,7 @@ impl<'a> Request<'a> {
     pub fn unknown_options(&self) -> impl Iterator<Item = TftpResult<(&str, &str)>> {
         OptionsIterator {
             buff: self.unknown_options,
+            error: false,
         }
         .unknown()
     }
@@ -641,6 +642,7 @@ impl<'a> OptionAck<'a> {
     pub fn unknown_options(&self) -> impl Iterator<Item = TftpResult<(&str, &str)>> {
         OptionsIterator {
             buff: self.unknown_options,
+            error: false,
         }
         .unknown()
     }
@@ -648,6 +650,7 @@ impl<'a> OptionAck<'a> {
 
 /// an iterator over name-value pairs of options in a read/write-request packet or option-acknowledge packet
 pub struct OptionsIterator<'a> {
+    error: bool,
     buff: &'a [u8],
 }
 
@@ -667,12 +670,18 @@ impl<'a> OptionsIterator<'a> {
 impl<'a> Iterator for OptionsIterator<'a> {
     type Item = TftpResult<(&'a str, &'a str)>;
     fn next(&mut self) -> Option<Self::Item> {
+        if self.error {
+            return None;
+        }
         match get_option_pair(self.buff) {
             Ok(Some((pair, remainder))) => {
                 self.buff = remainder;
                 Some(Ok(pair))
             }
-            Err(e) => Some(Err(e)),
+            Err(e) => {
+                self.error = true;
+                Some(Err(e))
+            }
             Ok(None) => None,
         }
     }
